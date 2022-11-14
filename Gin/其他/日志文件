@@ -1,0 +1,484 @@
+### 1.日志文件
+
+```
+func main() {
+   gin.DisableConsoleColor()
+
+   // Logging to a file.
+   f, _ := os.Create("gin.log")
+   gin.DefaultWriter = io.MultiWriter(f)
+
+   // 如果需要同时将日志写入文件和控制台，请使用以下代码。
+   // gin.DefaultWriter = io.MultiWriter(f, os.Stdout)
+   r := gin.Default()
+   r.GET("/ping", func(c *gin.Context) {
+      c.String(200, "pong")
+   })
+   r.Run()
+}
+```
+
+![img](https://www.topgoer.com/static/gin/qita/1.png)
+
+###  2. Air实时加载
+
+Air能够实时监听项目的代码文件，在代码发生变更之后**自动重新编译并执行**，大大提高gin框架项目的开发效率。
+
+#### 2.1.2. Air介绍
+
+- 彩色日志输出
+- 自定义构建或二进制命令
+- 支持忽略子目录
+- 启动后支持监听新目录
+- 更好的构建过程
+
+#### 2.1.3. 安装Air
+
+##### Go
+
+```bash
+  go get -u github.com/cosmtrek/air
+```
+
+##### Linux
+
+```go
+ curl -fLo air https://git.io/linux_air
+```
+
+#### 2.1.4. 使用Air
+
+**首先切到你的项目目录**
+
+最简单的用法就是直接执行下面的命令：
+
+```bash
+# 首先在当前目录下查找 `.air.conf`配置文件，如果找不到就使用默认的
+air -c .air.conf
+```
+
+推荐的使用方法是：
+
+```bash
+# 1. 在当前目录创建一个新的配置文件.air.conf
+touch .air.conf
+
+# 2. 复制 `air.conf.example` 中的内容到这个文件，然后根据你的需要去修改它
+
+# 3. 使用你的配置运行 air, 如果文件名是 `.air.conf`，只需要执行 `air`。
+air
+```
+
+### 3.Gin验证码
+
+验证码：防止**接口被频繁调用**，**防止恶意注**册
+
+```bash
+    github.com/dchest/captcha
+```
+
+web端是怎么**实现验证码的功能**
+
+- 提供**一个路由**，先在**session**里写入**键值对（k->v）**，把**值写在图片**上，然后**生成图片**，显示在浏览器上面
+- 前端将**图片中的内容**发送给后端，后端根据**session中的k取得v**，比对校验。如果**通过继续下一步的逻辑**，失败给出错误提示
+
+#### 后端
+
+```go
+package main
+
+import (
+    "bytes"
+    "github.com/dchest/captcha"
+    "github.com/gin-contrib/sessions"
+    "github.com/gin-contrib/sessions/cookie"
+    "github.com/gin-gonic/gin"
+    "net/http"
+    "time"
+)
+
+// 中间件，处理session
+func Session(keyPairs string) gin.HandlerFunc {
+    store := SessionConfig()
+    return sessions.Sessions(keyPairs, store)
+}
+func SessionConfig() sessions.Store {
+    sessionMaxAge := 3600
+    sessionSecret := "topgoer"
+    var store sessions.Store
+    store = cookie.NewStore([]byte(sessionSecret))
+    store.Options(sessions.Options{
+        MaxAge: sessionMaxAge, //seconds
+        Path:   "/",
+    })
+    return store
+}
+
+func Captcha(c *gin.Context, length ...int) {
+    l := captcha.DefaultLen
+    w, h := 107, 36
+    if len(length) == 1 {
+        l = length[0]
+    }
+    if len(length) == 2 {
+        w = length[1]
+    }
+    if len(length) == 3 {
+        h = length[2]
+    }
+    captchaId := captcha.NewLen(l)
+    session := sessions.Default(c)
+    session.Set("captcha", captchaId)
+    _ = session.Save()
+    _ = Serve(c.Writer, c.Request, captchaId, ".png", "zh", false, w, h)
+}
+func CaptchaVerify(c *gin.Context, code string) bool {
+    session := sessions.Default(c)
+    if captchaId := session.Get("captcha"); captchaId != nil {
+        session.Delete("captcha")
+        _ = session.Save()
+        if captcha.VerifyString(captchaId.(string), code) {
+            return true
+        } else {
+            return false
+        }
+    } else {
+        return false
+    }
+}
+func Serve(w http.ResponseWriter, r *http.Request, id, ext, lang string, download bool, width, height int) error {
+    w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+    w.Header().Set("Pragma", "no-cache")
+    w.Header().Set("Expires", "0")
+
+    var content bytes.Buffer
+    switch ext {
+    case ".png":
+        w.Header().Set("Content-Type", "image/png")
+        _ = captcha.WriteImage(&content, id, width, height)
+    case ".wav":
+        w.Header().Set("Content-Type", "audio/x-wav")
+        _ = captcha.WriteAudio(&content, id, lang)
+    default:
+        return captcha.ErrNotFound
+    }
+
+    if download {
+        w.Header().Set("Content-Type", "application/octet-stream")
+    }
+    http.ServeContent(w, r, id+ext, time.Time{}, bytes.NewReader(content.Bytes()))
+    return nil
+}
+
+func main() {
+    router := gin.Default()
+    router.LoadHTMLGlob("./*.html")
+    router.Use(Session("topgoer"))
+    router.GET("/captcha", func(c *gin.Context) {
+        Captcha(c, 4)
+    })
+    router.GET("/", func(c *gin.Context) {
+        c.HTML(http.StatusOK, "index.html", nil)
+    })
+    router.GET("/captcha/verify/:value", func(c *gin.Context) {
+        value := c.Param("value")
+        if CaptchaVerify(c, value) {
+            c.JSON(http.StatusOK, gin.H{"status": 0, "msg": "success"})
+        } else {
+            c.JSON(http.StatusOK, gin.H{"status": 1, "msg": "failed"})
+        }
+    })
+    router.Run(":8080")
+}
+```
+
+#### 前端页面
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>www.topgoer.com验证码</title>
+</head>
+<body>
+<img src="/captcha" onclick="this.src='/captcha?v='+Math.random()">
+</body>
+</html>
+```
+
+浏览器访问[http://127.0.0.1:8080](http://127.0.0.1:8080/)
+
+访问http://127.0.0.1:8080/captcha/verify/5721 进行验证
+
+###  4.生成解析Token
+
+如今有很多将身**份验证内置到API中的方法** -JSON Web令牌只是其中之一。**JSON Web令牌（JWT）作为令牌系统**而不是在每次请求时都发送用户名和密码
+
+JWT的实际应用示例。主要有两个部分：**提供用户名和密码以获取令牌**；**并根据请求检查该令牌**。
+
+#### JWT的数据结构
+
+- Header（头部）
+- Payload（负载）
+- Signature（签名）
+
+写成一行就是  Header.Payload.Signature
+
+##### Header
+
+Header 部分是一个 JSON 对象，描述 JWT 的元数据，通常是下面的样子。
+
+> ```javascript
+> {
+>   "alg": "HS256",
+>   "typ": "JWT"
+> }
+> ```
+
+##### Payload
+
+- iss (issuer)：签发人
+- exp (expiration time)：过期时间
+- sub (subject)：主题
+- aud (audience)：受众
+- nbf (Not Before)：生效时间
+- iat (Issued At)：签发时间
+- jti (JWT ID)：编号
+
+除了官方字段，你还可以定义私有字段
+
+```javascript
+{
+  "sub": "1234567890",
+  "name": "John Doe",
+  "admin": true
+}
+```
+
+JWT **默认是不加密的**，任何人都可以读到
+
+##### Signature
+
+```javascript
+HMACSHA256(
+  base64UrlEncode(header) + "." +
+  base64UrlEncode(payload),
+  secret)
+```
+
+#### JWT 的使用方式
+
+客户端每次与服务器通信，都要**带上这个 JWT**。你可以把它放在 **Cookie 里面自动发送**，但是这样不能跨域，所以更好的做法是放在 **HTTP 请求的头信息**`Authorization`字段里面
+
+```javascript
+Authorization: Bearer <token>
+```
+
+#### JWT的五个特点
+
+1. JWT **默认是不加密**，但也是可以加密的。生成原始 Token 以后，可以**用密钥再加密一次**。
+2. JWT **不加密**的情况下，**不能将秘密数据写入 JWT。**
+3. JWT 不仅可以**用于认证**，也可以用于**交换信息**。有效使用 JWT，可以**降低服务器查询数据库**的次数。
+4. JWT 的**最大缺点**是，由于**服务器不保存 session 状态**，因此无法在使用过程中**废止某个 token**，或者**更改 token 的权限**。也就是说，一旦 JWT 签发了，在**到期之前就会始终有效，**除非服务器部署额外的逻辑。
+5. JWT 本身**包含了认证信息**，一旦泄露，任何人都可以获得该令牌的所有权限。为**了减少盗用**，JWT 的有效期应该**设置得比较短**。对于一些比较重要的权限，使用时**应该再次对用户进行认证**。
+6. 为了减少盗用，JWT 不应该使用 HTTP 协议明码传输，要使用 HTTPS 协议传输
+
+#### JWT代码示例
+
+```go
+package main
+
+import (
+    "fmt"
+    "net/http"
+    "time"
+
+    "github.com/dgrijalva/jwt-go"
+    "github.com/gin-gonic/gin"
+)
+
+//自定义一个字符串
+var jwtkey = []byte("www.topgoer.com")
+var str string
+
+type Claims struct {
+    UserId uint
+    jwt.StandardClaims
+}
+
+func main() {
+    r := gin.Default()
+    r.GET("/set", setting)
+    r.GET("/get", getting)
+    //监听端口默认为8080
+    r.Run(":8080")
+}
+
+//颁发token
+func setting(ctx *gin.Context) {
+    expireTime := time.Now().Add(7 * 24 * time.Hour)
+    claims := &Claims{
+        UserId: 2,
+        StandardClaims: jwt.StandardClaims{
+            ExpiresAt: expireTime.Unix(), //过期时间
+            IssuedAt:  time.Now().Unix(),
+            Issuer:    "127.0.0.1",  // 签名颁发者
+            Subject:   "user token", //签名主题
+        },
+    }
+    token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+    // fmt.Println(token)
+    tokenString, err := token.SignedString(jwtkey)
+    if err != nil {
+        fmt.Println(err)
+    }
+    str = tokenString
+    ctx.JSON(200, gin.H{"token": tokenString})
+}
+
+//解析token
+func getting(ctx *gin.Context) {
+    tokenString := ctx.GetHeader("Authorization")
+    //vcalidate token formate
+    if tokenString == "" {
+        ctx.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "权限不足"})
+        ctx.Abort()
+        return
+    }
+
+    token, claims, err := ParseToken(tokenString)
+    if err != nil || !token.Valid {
+        ctx.JSON(http.StatusUnauthorized, gin.H{"code": 401, "msg": "权限不足"})
+        ctx.Abort()
+        return
+    }
+    fmt.Println(111)
+    fmt.Println(claims.UserId)
+}
+
+func ParseToken(tokenString string) (*jwt.Token, *Claims, error) {
+    Claims := &Claims{}
+    token, err := jwt.ParseWithClaims(tokenString, Claims, func(token *jwt.Token) (i interface{}, err error) {
+        return jwtkey, nil
+    })
+    return token, Claims, err
+}
+```
+
+
+
+### 5.权限管理
+
+#### Casbin的作用：
+
+- 以**经典{subject, object, action}形式**或您定义的**自定义形式实施策略**，同时支持允许和拒绝授权。
+- 处理访问**控制模型及其策略的存储**。
+- 管理**角色用户映射**和**角色角色映射**（RBAC中的角色层次结构）。
+- 支持**内置的超级用户**，例如root或administrator。超级用户可以在**没有显式权限的情况下**执行任何操作。
+- 多个**内置运算符支持规则匹配**。例如，keyMatch可以将资源键映射/foo/bar到模式`/foo*`。
+
+#### Casbin不执行的操作：
+
+- **身份验证**（又名验证username以及password用户登录时）
+- **管理用户或角色列表**。我相信项目本身管理这些实体会更方便。用户通常具有其密码，而Casbin并非设计为密码容器。但是，Casbin存储RBAC方案的用户角色映射。
+
+##### 5.1.3  安装
+
+```go
+    go get github.com/casbin/casbin
+```
+
+##### 5.1.4. 示例代码
+
+```go
+package main
+
+import (
+    "fmt"
+    "log"
+
+    "github.com/casbin/casbin"
+    xormadapter "github.com/casbin/xorm-adapter"
+    "github.com/gin-gonic/gin"
+    _ "github.com/go-sql-driver/mysql"
+)
+
+func main() {
+    // 要使用自己定义的数据库rbac_db,最后的true很重要.默认为false,使用缺省的数据库名casbin,不存在则创建
+    a, err := xormadapter.NewAdapter("mysql", "root:root@tcp(127.0.0.1:3306)/goblog?charset=utf8", true)
+    if err != nil {
+        log.Printf("连接数据库错误: %v", err)
+        return
+    }
+    e, err := casbin.NewEnforcer("./rbac_models.conf", a)
+    if err != nil {
+        log.Printf("初始化casbin错误: %v", err)
+        return
+    }
+    //从DB加载策略
+    e.LoadPolicy()
+
+    //获取router路由对象
+    r := gin.New()
+
+    r.POST("/api/v1/add", func(c *gin.Context) {
+        fmt.Println("增加Policy")
+        if ok, _ := e.AddPolicy("admin", "/api/v1/hello", "GET"); !ok {
+            fmt.Println("Policy已经存在")
+        } else {
+            fmt.Println("增加成功")
+        }
+    })
+    //删除policy
+    r.DELETE("/api/v1/delete", func(c *gin.Context) {
+        fmt.Println("删除Policy")
+        if ok, _ := e.RemovePolicy("admin", "/api/v1/hello", "GET"); !ok {
+            fmt.Println("Policy不存在")
+        } else {
+            fmt.Println("删除成功")
+        }
+    })
+    //获取policy
+    r.GET("/api/v1/get", func(c *gin.Context) {
+        fmt.Println("查看policy")
+        list := e.GetPolicy()
+        for _, vlist := range list {
+            for _, v := range vlist {
+                fmt.Printf("value: %s, ", v)
+            }
+        }
+    })
+    //使用自定义拦截器中间件
+    r.Use(Authorize(e))
+    //创建请求
+    r.GET("/api/v1/hello", func(c *gin.Context) {
+        fmt.Println("Hello 接收到GET请求..")
+    })
+
+    r.Run(":9000") //参数为空 默认监听8080端口
+}
+
+//拦截器
+func Authorize(e *casbin.Enforcer) gin.HandlerFunc {
+
+    return func(c *gin.Context) {
+
+        //获取请求的URI
+        obj := c.Request.URL.RequestURI()
+        //获取请求方法
+        act := c.Request.Method
+        //获取用户的角色
+        sub := "admin"
+
+        //判断策略中是否存在
+        if ok, _ := e.Enforce(sub, obj, act); ok {
+            fmt.Println("恭喜您,权限验证通过")
+            c.Next()
+        } else {
+            fmt.Println("很遗憾,权限验证没有通过")
+            c.Abort()
+        }
+    }
+}
+```
